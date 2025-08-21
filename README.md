@@ -7,7 +7,13 @@ I don’t need anything else from you right now—let’s do it.
 
 ---
 
-# What I noticed in your latest project (very briefly)
+
+zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
+
+
+
+
+**# What I noticed in your latest project (very briefly)**
 
 * I still see literal `...` placeholders in multiple files (e.g., `Users.java`, `PolicyServiceImpl.java`, `SecurityConfig.java`). These **won’t compile**. Replace all `...` with real code.
 * Your roles are an **enum with `ROLE_` prefix**:
