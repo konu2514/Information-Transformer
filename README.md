@@ -522,3 +522,371 @@ If you want to preview quickly, you can temporarily add:
 * Access is enforced in the **service layer** (consistent with your current approach).
 
 If you want email or realtime (WebSocket) delivery later, we can layer it on top of this foundation without changing your business logic.
+
+----------------------------------------------------------------------------------------------------------------------------
+
+
+
+What I noticed in your project
+
+You have Service classes like PolicyServiceImpl, PolicyVersionServiceImpl, DepartmentServiceImpl, UserServiceImpl, etc.
+
+These call repositories directly. Right now they don’t check if the entity exists before using it.
+
+Example:
+
+versionRepo.findByPolicyIdAndVersion(policyId, version);
+
+
+→ If not found, this could throw NullPointerException.
+
+You don’t have centralized error handling – so if something fails, the whole app can return raw stacktrace.
+
+You’ll need custom exceptions (domain-specific) for clean code.
+
+✅ Step 1: Create a package org.godigit.policyvault.exception
+
+Inside it, add some custom exceptions:
+
+package org.godigit.policyvault.exception;
+
+public class PolicyNotFoundException extends RuntimeException {
+    public PolicyNotFoundException(String message) {
+        super(message);
+    }
+}
+
+package org.godigit.policyvault.exception;
+
+public class UserNotFoundException extends RuntimeException {
+    public UserNotFoundException(String message) {
+        super(message);
+    }
+}
+
+package org.godigit.policyvault.exception;
+
+public class DepartmentNotFoundException extends RuntimeException {
+    public DepartmentNotFoundException(String message) {
+        super(message);
+    }
+}
+
+
+You can add more later (like UnauthorizedAccessException, etc.).
+
+✅ Step 2: Create GlobalExceptionHandler
+package org.godigit.policyvault.exception;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ControllerAdvice;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
+
+@ControllerAdvice
+public class GlobalExceptionHandler {
+
+    // Handle specific exceptions
+    @ExceptionHandler(PolicyNotFoundException.class)
+    public ResponseEntity<Object> handlePolicyNotFound(PolicyNotFoundException ex) {
+        return buildResponse(ex.getMessage(), "Policy Not Found", HttpStatus.NOT_FOUND);
+    }
+
+    @ExceptionHandler(UserNotFoundException.class)
+    public ResponseEntity<Object> handleUserNotFound(UserNotFoundException ex) {
+        return buildResponse(ex.getMessage(), "User Not Found", HttpStatus.NOT_FOUND);
+    }
+
+    @ExceptionHandler(DepartmentNotFoundException.class)
+    public ResponseEntity<Object> handleDepartmentNotFound(DepartmentNotFoundException ex) {
+        return buildResponse(ex.getMessage(), "Department Not Found", HttpStatus.NOT_FOUND);
+    }
+
+    // Handle any uncaught exception
+    @ExceptionHandler(Exception.class)
+    public ResponseEntity<Object> handleGenericException(Exception ex) {
+        return buildResponse(ex.getMessage(), "Internal Server Error", HttpStatus.INTERNAL_SERVER_ERROR);
+    }
+
+    // Helper method
+    private ResponseEntity<Object> buildResponse(String message, String error, HttpStatus status) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("timestamp", Instant.now());
+        body.put("error", error);
+        body.put("message", message);
+        body.put("status", status.value());
+        return new ResponseEntity<>(body, status);
+    }
+}
+
+✅ Step 3: Update Service classes to throw exceptions
+
+Example PolicyVersionServiceImpl (from your code):
+
+@Override
+public PolicyVersionResponse getVersion(UUID policyId, int version) {
+    var pv = versionRepo.findByPolicyIdAndVersion(policyId, version);
+    if (pv == null) {
+        throw new PolicyNotFoundException(
+            "Policy with ID " + policyId + " and version " + version + " not found"
+        );
+    }
+    return toDto(pv);
+}
+
+
+Example UserServiceImpl (you have user repository lookups):
+
+var user = users.findByUsername(username)
+    .orElseThrow(() -> new UserNotFoundException("User not found with username: " + username));
+
+
+Example DepartmentServiceImpl:
+
+var dept = departmentRepo.findById(deptId)
+    .orElseThrow(() -> new DepartmentNotFoundException("Department not found with id: " + deptId));
+
+✅ Step 4: Benefits after integration
+
+Instead of server crashing, you’ll get clean JSON like:
+
+{
+  "timestamp": "2025-08-21T18:45:32.123Z",
+  "error": "Policy Not Found",
+  "message": "Policy with ID 1234 and version 2 not found",
+  "status": 404
+}
+
+
+If validation fails or null pointer happens → your API won’t break, it will return 400/500 JSON.
+
+You can extend later with logging or error codes.
+
+👉 Now my question for you:
+Do you want me to go through each service in your project (Policy, Department, User, AuditLog, etc.) and point out exact places to throw these exceptions,
+or is the above template enough for you to add them yourself?
+
+You said:
+
+✅ Step 3: Update Service classes to throw exceptions
+
+can you give the fully code after implementing the exceptions in the service
+ChatGPT said:
+
+Got it 👍
+You want me to take your existing service classes (from the project you uploaded) and show the fully updated code with exceptions integrated.
+
+Since your project has multiple service classes (PolicyServiceImpl, PolicyVersionServiceImpl, DepartmentServiceImpl, UserServiceImpl, AuditLogServiceImpl, CustomUserDetailsService, etc.), I’ll start with one by one full code updates so you can see the pattern.
+
+Let’s begin with the most important ones:
+
+1️⃣ PolicyVersionServiceImpl (updated with exception handling)
+package org.godigit.policyvault.service.impl;
+
+import org.godigit.policyvault.dto.PolicyVersionResponse;
+import org.godigit.policyvault.entity.PolicyVersion;
+import org.godigit.policyvault.exception.PolicyNotFoundException;
+import org.godigit.policyvault.repository.PolicyVersionRepository;
+import org.godigit.policyvault.service.PolicyVersionService;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.UUID;
+import java.util.stream.Collectors;
+
+@Service
+public class PolicyVersionServiceImpl implements PolicyVersionService {
+
+    private final PolicyVersionRepository versionRepo;
+
+    public PolicyVersionServiceImpl(PolicyVersionRepository versionRepo) {
+        this.versionRepo = versionRepo;
+    }
+
+    @Override
+    public PolicyVersionResponse getVersion(UUID policyId, int version) {
+        PolicyVersion pv = versionRepo.findByPolicyIdAndVersion(policyId, version);
+        if (pv == null) {
+            throw new PolicyNotFoundException(
+                    "Policy with ID " + policyId + " and version " + version + " not found"
+            );
+        }
+        return toDto(pv);
+    }
+
+    @Override
+    public List<PolicyVersionResponse> getAllVersions(UUID policyId) {
+        List<PolicyVersion> versions = versionRepo.findByPolicyId(policyId);
+        if (versions == null || versions.isEmpty()) {
+            throw new PolicyNotFoundException(
+                    "No versions found for Policy with ID " + policyId
+            );
+        }
+        return versions.stream().map(this::toDto).collect(Collectors.toList());
+    }
+
+    private PolicyVersionResponse toDto(PolicyVersion pv) {
+        return new PolicyVersionResponse(
+                pv.getVersion(),
+                pv.getContent(),
+                pv.getCreatedAt()
+        );
+    }
+}
+
+2️⃣ UserServiceImpl (with UserNotFoundException)
+package org.godigit.policyvault.service.impl;
+
+import org.godigit.policyvault.entity.User;
+import org.godigit.policyvault.exception.UserNotFoundException;
+import org.godigit.policyvault.repository.UserRepository;
+import org.godigit.policyvault.service.UserService;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.UUID;
+
+@Service
+public class UserServiceImpl implements UserService {
+
+    private final UserRepository users;
+
+    public UserServiceImpl(UserRepository users) {
+        this.users = users;
+    }
+
+    @Override
+    public User getUserById(UUID userId) {
+        return users.findById(userId)
+                .orElseThrow(() -> new UserNotFoundException("User not found with ID: " + userId));
+    }
+
+    @Override
+    public User getUserByUsername(String username) {
+        return users.findByUsername(username)
+                .orElseThrow(() -> new UserNotFoundException("User not found with username: " + username));
+    }
+
+    @Override
+    public List<User> getAllUsers() {
+        List<User> list = users.findAll();
+        if (list.isEmpty()) {
+            throw new UserNotFoundException("No users found in the system");
+        }
+        return list;
+    }
+}
+
+3️⃣ DepartmentServiceImpl (with DepartmentNotFoundException)
+package org.godigit.policyvault.service.impl;
+
+import org.godigit.policyvault.entity.Department;
+import org.godigit.policyvault.exception.DepartmentNotFoundException;
+import org.godigit.policyvault.repository.DepartmentRepository;
+import org.godigit.policyvault.service.DepartmentService;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.UUID;
+
+@Service
+public class DepartmentServiceImpl implements DepartmentService {
+
+    private final DepartmentRepository departmentRepo;
+
+    public DepartmentServiceImpl(DepartmentRepository departmentRepo) {
+        this.departmentRepo = departmentRepo;
+    }
+
+    @Override
+    public Department getDepartmentById(UUID deptId) {
+        return departmentRepo.findById(deptId)
+                .orElseThrow(() -> new DepartmentNotFoundException("Department not found with id: " + deptId));
+    }
+
+    @Override
+    public List<Department> getAllDepartments() {
+        List<Department> list = departmentRepo.findAll();
+        if (list.isEmpty()) {
+            throw new DepartmentNotFoundException("No departments found in the system");
+        }
+        return list;
+    }
+}
+
+
+⚡ Next, I can also update:
+
+PolicyServiceImpl (to throw PolicyNotFoundException)
+
+AuditLogServiceImpl (to throw exception if no logs found)
+
+CustomUserDetailsService (already uses UsernameNotFoundException, but we can standardize with UserNotFoundException)
+
+👉 Do you want me to update all service classes fully with exception handling in one go, or should I give them step by step (like I did above) so you can implement & test gradually?
+
+You said:
+
+Your roles are an **enum with `ROLE_` prefix**: java CopyEdit `public enum Role { ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_DEPT_HEAD, ROLE_EMPLOYEE }` When you use `hasRole('X')`, Spring will look for **`ROLE_X`**. So use `hasRole('DEPT_HEAD')`, `hasRole('ADMIN')`, etc. (No `ROLE_` in the annotation.)
+
+so give the correct definition for PreAuthorize
+ChatGPT said:
+
+Here’s the correct way to use @PreAuthorize in your project 👇
+
+Since your roles are defined like this:
+
+public enum Role {
+    ROLE_ADMIN,
+    ROLE_COMPLIANCE_OFFICER,
+    ROLE_DEPT_HEAD,
+    ROLE_EMPLOYEE
+}
+
+
+Spring Security automatically adds the ROLE_ prefix internally when checking roles.
+So in @PreAuthorize, you do not include ROLE_.
+
+✅ Correct usage:
+
+@PreAuthorize("hasRole('ADMIN')")
+@PreAuthorize("hasRole('DEPT_HEAD')")
+@PreAuthorize("hasAnyRole('ADMIN', 'COMPLIANCE_OFFICER')")
+
+
+❌ Wrong usage (will not match):
+
+@PreAuthorize("hasRole('ROLE_ADMIN')")
+@PreAuthorize("hasRole('ROLE_DEPT_HEAD')")
+
+Example in your service:
+@Service
+public class PolicyServiceImpl implements PolicyService {
+
+    @Override
+    @PreAuthorize("hasAnyRole('ADMIN', 'COMPLIANCE_OFFICER')")
+    public Policy createPolicy(Policy policy) {
+        // only ADMIN or COMPLIANCE_OFFICER can create policies
+        return policyRepo.save(policy);
+    }
+
+    @Override
+    @PreAuthorize("hasAnyRole('ADMIN', 'DEPT_HEAD', 'COMPLIANCE_OFFICER')")
+    public Policy updatePolicy(UUID id, Policy policy) {
+        // logic to update
+        return policyRepo.save(policy);
+    }
+
+    @Override
+    @PreAuthorize("hasAnyRole('ADMIN', 'EMPLOYEE', 'DEPT_HEAD', 'COMPLIANCE_OFFICER')")
+    public List<Policy> getAllPolicies() {
+        return policyRepo.findAll();
+    }
+}
+
+
+👉 Do you want me to go through each service class in your project and add @PreAuthorize with correct roles so you’ll have the full updated code ready?
