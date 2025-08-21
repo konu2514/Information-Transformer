@@ -1,198 +1,524 @@
-USER SERVICE IMPL
+Absolutely—I understand what you want:
 
-package org.godigit.policyvault.service.impl;
+1. quick sanity-check of the latest project you uploaded, and
+2. a clear, step-by-step implementation of a **Department Head notification** feature, with **full, paste-ready code** and comments.
 
-import org.godigit.policyvault.entities.Role;
-import org.godigit.policyvault.entities.Users;
-import org.godigit.policyvault.repository.UserRepository;
-import org.godigit.policyvault.service.UserService;
-import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.security.crypto.password.PasswordEncoder;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+I don’t need anything else from you right now—let’s do it.
+
+---
+
+# What I noticed in your latest project (very briefly)
+
+* I still see literal `...` placeholders in multiple files (e.g., `Users.java`, `PolicyServiceImpl.java`, `SecurityConfig.java`). These **won’t compile**. Replace all `...` with real code.
+* Your roles are an **enum with `ROLE_` prefix**:
+
+  ```java
+  public enum Role { ROLE_ADMIN, ROLE_COMPLIANCE_OFFICER, ROLE_DEPT_HEAD, ROLE_EMPLOYEE }
+  ```
+
+  When you use `hasRole('X')`, Spring will look for **`ROLE_X`**. So use `hasRole('DEPT_HEAD')`, `hasRole('ADMIN')`, etc. (No `ROLE_` in the annotation.)
+* Make your role usage consistent: use **`DEPT_HEAD`** (not `DEPARTMENT_HEAD`) everywhere.
+* Your endpoints mix `/policies` and `/api/...` in security—make sure your `SecurityConfig` patterns actually match your controller paths.
+
+Those are just heads-ups so you don’t run into invisible bugs while adding notifications.
+
+---
+
+# Goal of the new feature
+
+When a policy is **created** or **updated**, notify the **Department Head** of that policy’s department.
+Dept Heads can fetch their notifications (and mark them as read).
+
+We’ll add:
+
+* `Notification` entity + repository
+* `NotificationService` (+ impl)
+* `NotificationController` endpoints
+* Small changes in `UserRepository` and `PolicyServiceImpl` to **trigger notifications**
+
+> I’ll assume your `Users` entity has a `department` field (string) and that Dept Heads are users with role `ROLE_DEPT_HEAD`. If your `roles` mapping is a `Set<Role>`, make sure it’s annotated as an **ElementCollection** (I include the correct mapping below).
+
+---
+
+## 1) Entity: `Notification`
+
+**File:** `src/main/java/org/godigit/policyvault/entities/Notification.java`
+
+```java
+package org.godigit.policyvault.entities;
+
+import jakarta.persistence.*;
+import lombok.Getter;
+import lombok.Setter;
 
 import java.time.Instant;
-import java.util.Set;
+import java.util.UUID;
 
-@Service
-public class UserServiceImpl implements UserService {
+/**
+ * Stores a single user notification (e.g., "Policy X was updated").
+ */
+@Entity
+@Getter @Setter
+@Table(name = "notifications", indexes = {
+        @Index(name = "idx_notifications_recipient", columnList = "recipient_id"),
+        @Index(name = "idx_notifications_created_at", columnList = "createdAt")
+})
+public class Notification {
 
-    private final UserRepository users;
-    private final PasswordEncoder encoder;
+    @Id
+    @GeneratedValue
+    private UUID id;
 
-    public UserServiceImpl(UserRepository users, PasswordEncoder encoder) {
-        this.users = users;
-        this.encoder = encoder;
-    }
+    @Column(nullable = false, length = 300)
+    private String message;
 
-    @Override
-    @Transactional
-    @PreAuthorize("hasRole('ADMIN')") 
-    public Users createUser(String username, String email, String rawPassword,
-                            String department, Set<Role> roles) {
-        Users u = new Users();
-        u.setUsername(username);
-        u.setEmail(email);
-        u.setDepartment(department);
-        u.setPasswordHash(encoder.encode(rawPassword));
-        u.setRoles(roles);
-        return users.save(u);
-    }
+    @Column(nullable = false)
+    private boolean readFlag = false;
 
-    @Override
-    @Transactional
-    @PreAuthorize("hasAnyRole('ADMIN','COMPLIANCE_OFFICER','DEPARTMENT_HEAD','EMPLOYEE')")
-    public void touchLogin(String username) {
-        users.findByUsername(username).ifPresent(u -> {
-            u.setLastLoginAt(Instant.now());
-            users.save(u);
-        });
-    }
+    @Column(nullable = false, updatable = false)
+    private Instant createdAt = Instant.now();
+
+    /**
+     * Who receives this notification (the Dept Head).
+     */
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "recipient_id", nullable = false,
+            foreignKey = @ForeignKey(name = "fk_notification_recipient"))
+    private Users recipient;
+
+    /**
+     * Optional link to a policy this notification refers to (helpful for UIs).
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "policy_id", foreignKey = @ForeignKey(name = "fk_notification_policy"))
+    private Policy policy;
+
+    /**
+     * Store department snapshot (string). Useful for filtering without joins.
+     */
+    @Column(length = 80)
+    private String department;
 }
+```
 
+---
 
---------------------------------------------
+## 2) Repository: `NotificationRepository`
 
-CHANGE LOG SERVICE IMPL
+**File:** `src/main/java/org/godigit/policyvault/repository/NotificationRepository.java`
 
+```java
+package org.godigit.policyvault.repository;
+
+import org.godigit.policyvault.entities.Notification;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+
+public interface NotificationRepository extends JpaRepository<Notification, UUID> {
+
+    // List for a user (order newest first)
+    List<Notification> findByRecipientUsernameOrderByCreatedAtDesc(String username);
+
+    // Unread count for a user
+    int countByRecipientUsernameAndReadFlagIsFalse(String username);
+
+    // Fetch ensuring the notification belongs to the user
+    Optional<Notification> findByIdAndRecipientUsername(UUID id, String username);
+}
+```
+
+---
+
+## 3) (Important) Fix/Confirm `Users.roles` mapping (ElementCollection)
+
+If your `Users` entity currently has:
+
+```java
+@Enumerated(EnumType.STRING)
+@Column(name = "role", nullable=false, length=40)
+private Set<Role> roles = new HashSet<>();
+```
+
+That’s **invalid** for a collection. Replace with:
+
+```java
+@ElementCollection(fetch = FetchType.EAGER)            // <-- collection of enums
+@CollectionTable(
+        name = "user_roles",
+        joinColumns = @JoinColumn(name = "user_id",
+                foreignKey = @ForeignKey(name = "fk_user_roles_user"))
+)
+@Enumerated(EnumType.STRING)
+@Column(name = "role", length = 40, nullable = false)
+private Set<Role> roles = new java.util.HashSet<>();
+```
+
+This will create a separate `user_roles` table and make repository queries on roles work.
+
+---
+
+## 4) Repository: add a method to find Dept Head by department
+
+**File:** `src/main/java/org/godigit/policyvault/repository/UserRepository.java`
+(Add this method)
+
+```java
+import org.godigit.policyvault.entities.Role;
+// ...
+
+// One Dept Head for a department (adjust to findAll... if you want multiple heads)
+java.util.Optional<org.godigit.policyvault.entities.Users>
+findFirstByDepartmentAndRolesContaining(String department, Role role);
+```
+
+> Because `roles` is a collection of enums, Spring Data supports `Containing` for collection membership.
+
+---
+
+## 5) DTO: `NotificationDto` (simple API shape)
+
+**File:** `src/main/java/org/godigit/policyvault/dto/NotificationDto.java`
+
+```java
+package org.godigit.policyvault.dto;
+
+import java.time.Instant;
+import java.util.UUID;
+
+public record NotificationDto(
+        UUID id,
+        String message,
+        boolean read,
+        Instant createdAt,
+        UUID policyId,
+        String department
+) {}
+```
+
+---
+
+## 6) Service interface: `NotificationService`
+
+**File:** `src/main/java/org/godigit/policyvault/service/NotificationService.java`
+
+```java
+package org.godigit.policyvault.service;
+
+import org.godigit.policyvault.dto.NotificationDto;
+import org.godigit.policyvault.entities.Policy;
+import org.godigit.policyvault.entities.Users;
+import org.springframework.security.access.prepost.PreAuthorize;
+
+import java.util.List;
+import java.util.UUID;
+
+public interface NotificationService {
+
+    /**
+     * Create a simple notification for a user.
+     */
+    void notifyUser(Users user, String message, Policy policy, String department);
+
+    /**
+     * Find the dept head for the given department and notify them.
+     * (Called from PolicyService when creating/updating policies)
+     */
+    void notifyDeptHead(String department, String message, Policy policy);
+
+    /**
+     * Get notifications for the currently authenticated user (by username).
+     */
+    @PreAuthorize("isAuthenticated()")
+    List<NotificationDto> getMyNotifications(String username);
+
+    /**
+     * Number of unread notifications for the authenticated user.
+     */
+    @PreAuthorize("isAuthenticated()")
+    int getMyUnreadCount(String username);
+
+    /**
+     * Mark one notification as read (must belong to the user).
+     */
+    @PreAuthorize("isAuthenticated()")
+    void markAsRead(UUID id, String username);
+
+    /**
+     * Admin utility: fetch notifications for any user.
+     */
+    @PreAuthorize("hasRole('ADMIN')")
+    List<NotificationDto> getForUser(String username);
+}
+```
+
+---
+
+## 7) Service implementation: `NotificationServiceImpl`
+
+**File:** `src/main/java/org/godigit/policyvault/service/impl/NotificationServiceImpl.java`
+
+```java
 package org.godigit.policyvault.service.impl;
 
-import org.godigit.policyvault.dto.ChangeLogResponse;
-import org.godigit.policyvault.repository.ChangeLogRepository;
-import org.godigit.policyvault.service.ChangeLogService;
-import org.springframework.security.access.prepost.PreAuthorize;
+import org.godigit.policyvault.dto.NotificationDto;
+import org.godigit.policyvault.entities.Notification;
+import org.godigit.policyvault.entities.Policy;
+import org.godigit.policyvault.entities.Role;
+import org.godigit.policyvault.entities.Users;
+import org.godigit.policyvault.repository.NotificationRepository;
+import org.godigit.policyvault.repository.UserRepository;
+import org.godigit.policyvault.service.NotificationService;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 import java.util.UUID;
 
 @Service
-public class ChangeLogServiceImpl implements ChangeLogService {
+@Transactional
+public class NotificationServiceImpl implements NotificationService {
 
-    private final ChangeLogRepository changeLogRepo;
+    private final NotificationRepository notificationRepo;
+    private final UserRepository userRepo;
 
-    public ChangeLogServiceImpl(ChangeLogRepository changeLogRepo) {
-        this.changeLogRepo = changeLogRepo;
+    public NotificationServiceImpl(NotificationRepository notificationRepo,
+                                   UserRepository userRepo) {
+        this.notificationRepo = notificationRepo;
+        this.userRepo = userRepo;
     }
 
     @Override
-    @PreAuthorize("hasAnyRole('COMPLIANCE_OFFICER','ADMIN')")
-    public List<ChangeLogResponse> getChangeLogs(UUID policyId) {
-        return changeLogRepo.findByPolicyId(policyId).stream()
-                .map(cl -> new ChangeLogResponse(
-                        cl.getId(),
-                        cl.getPolicy().getId(),
-                        cl.getOldVersion(),
-                        cl.getNewVersion(),
-                        cl.getChangedBy(),
-                        cl.getDescription(),
-                        cl.getChangeDate()
+    public void notifyUser(Users user, String message, Policy policy, String department) {
+        Notification n = new Notification();
+        n.setRecipient(user);
+        n.setMessage(message);
+        n.setPolicy(policy);
+        n.setDepartment(department);
+        notificationRepo.save(n);
+    }
+
+    @Override
+    public void notifyDeptHead(String department, String message, Policy policy) {
+        userRepo.findFirstByDepartmentAndRolesContaining(department, Role.ROLE_DEPT_HEAD)
+                .ifPresent(head -> notifyUser(head, message, policy, department));
+        // If no head found, we silently skip. You can log or fallback to ADMINs if you like.
+    }
+
+    @Override
+    public List<NotificationDto> getMyNotifications(String username) {
+        return notificationRepo.findByRecipientUsernameOrderByCreatedAtDesc(username)
+                .stream()
+                .map(n -> new NotificationDto(
+                        n.getId(),
+                        n.getMessage(),
+                        n.isReadFlag(),
+                        n.getCreatedAt(),
+                        n.getPolicy() != null ? n.getPolicy().getId() : null,
+                        n.getDepartment()
+                ))
+                .toList();
+    }
+
+    @Override
+    public int getMyUnreadCount(String username) {
+        return notificationRepo.countByRecipientUsernameAndReadFlagIsFalse(username);
+    }
+
+    @Override
+    public void markAsRead(UUID id, String username) {
+        // Only allow marking the user's own notification
+        var n = notificationRepo.findByIdAndRecipientUsername(id, username)
+                .orElseThrow(() -> new IllegalArgumentException("Notification not found or does not belong to user"));
+        if (!n.isReadFlag()) {
+            n.setReadFlag(true);
+            notificationRepo.save(n);
+        }
+    }
+
+    @Override
+    public List<NotificationDto> getForUser(String username) {
+        return notificationRepo.findByRecipientUsernameOrderByCreatedAtDesc(username)
+                .stream()
+                .map(n -> new NotificationDto(
+                        n.getId(),
+                        n.getMessage(),
+                        n.isReadFlag(),
+                        n.getCreatedAt(),
+                        n.getPolicy() != null ? n.getPolicy().getId() : null,
+                        n.getDepartment()
                 ))
                 .toList();
     }
 }
+```
 
-----------------------------
+---
 
-AUDIT LOG SERCIVE IMPL
+## 8) Controller: `NotificationController`
 
-package org.godigit.policyvault.service.impl;
+**File:** `src/main/java/org/godigit/policyvault/controller/NotificationController.java`
 
-import org.godigit.policyvault.entities.AuditLog;
-import org.godigit.policyvault.repository.AuditLogRepository;
-import org.godigit.policyvault.repository.PolicyRepository;
-import org.godigit.policyvault.service.AuditLogService;
-import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.stereotype.Service;
+```java
+package org.godigit.policyvault.controller;
 
-import java.time.Instant;
-import java.util.List;
-import java.util.UUID;
-
-@Service
-public class AuditLogServiceImpl implements AuditLogService {
-
-    private final AuditLogRepository auditLogRepo;
-    private final PolicyRepository policyRepository;
-
-    public AuditLogServiceImpl(AuditLogRepository auditLogRepo, PolicyRepository policyRepository) {
-        this.auditLogRepo = auditLogRepo;
-        this.policyRepository = policyRepository;
-    }
-
-    @Override
-    public void log(String userId, UUID policyId, String action) {
-        var log = new AuditLog();
-        log.setUserId(userId);
-        log.setPolicy(policyRepository.getReferenceById(policyId));
-        log.setAction(action);
-        auditLogRepo.save(log);
-    }
-
-    @Override
-    @PreAuthorize("hasRole('ADMIN')")
-    public List<AuditLog> getLogsByPolicy(UUID policyId) {
-        return auditLogRepo.findByPolicyId(policyId);
-    }
-
-    @Override
-    @PreAuthorize("hasRole('ADMIN')")
-    public List<AuditLog> getLogsByUser(String userId) {
-        return auditLogRepo.findByUserId(userId);
-    }
-
-    @Override
-    public void record(String userId, UUID policyId, String action, String description, Instant ts) {
-        // Currently empty, but you can implement this later.
-        // No need for @PreAut
-
----------------------------
-
-POLICY VERSION SERVICE IMPL
-
-package org.godigit.policyvault.service.impl;
-
-import org.godigit.policyvault.entities.PolicyVersion;
-import org.godigit.policyvault.dto.PolicyVersionResponse;
-import org.godigit.policyvault.repository.PolicyVersionRepository;
-import org.godigit.policyvault.service.PolicyVersionService;
-import org.springframework.security.access.prepost.PreAuthorize;
-import org.springframework.stereotype.Service;
+import org.godigit.policyvault.dto.NotificationDto;
+import org.godigit.policyvault.service.NotificationService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.UUID;
 
-@Service
-public class PolicyVersionServiceImpl implements PolicyVersionService {
+/**
+ * Endpoints for Dept Heads (and any user) to view notifications.
+ */
+@RestController
+@RequestMapping("/notifications")
+public class NotificationController {
 
-    private final PolicyVersionRepository versionRepo;
+    private final NotificationService notifications;
 
-    public PolicyVersionServiceImpl(PolicyVersionRepository versionRepo) {
-        this.versionRepo = versionRepo;
+    public NotificationController(NotificationService notifications) {
+        this.notifications = notifications;
     }
 
-    @Override
-    @PreAuthorize("hasRole('ADMIN')")
-    public List<PolicyVersionResponse> getAllVersions(UUID policyId) {
-        return versionRepo.findByPolicyIdOrderByVersionDesc(policyId).stream()
-                .map(this::toDto)
-                .toList();
+    /**
+     * Get my notifications (authenticated user).
+     */
+    @GetMapping("/my")
+    public ResponseEntity<List<NotificationDto>> myNotifications(Authentication auth) {
+        return ResponseEntity.ok(notifications.getMyNotifications(auth.getName()));
     }
 
-    @Override
-    @PreAuthorize("hasRole('ADMIN')")
-    public PolicyVersionResponse getVersion(UUID policyId, int version) {
-        var pv = versionRepo.findByPolicyIdAndVersion(policyId, version);
-        return toDto(pv);
+    /**
+     * Get my unread count.
+     */
+    @GetMapping("/my/unread-count")
+    public ResponseEntity<Integer> unreadCount(Authentication auth) {
+        return ResponseEntity.ok(notifications.getMyUnreadCount(auth.getName()));
     }
 
-    private PolicyVersionResponse toDto(PolicyVersion pv) {
-        return new PolicyVersionResponse(
-                pv.getId(),
-                pv.getPolicy().getId(),
-                pv.getVersion(),
-                pv.getContent(),
-                pv.getCreatedAt()
-        );
+    /**
+     * Mark one of my notifications as read.
+     */
+    @PatchMapping("/{id}/read")
+    public ResponseEntity<Void> markRead(@PathVariable UUID id, Authentication auth) {
+        notifications.markAsRead(id, auth.getName());
+        return ResponseEntity.noContent().build();
+    }
+
+    /**
+     * Admin: fetch someone else's notifications.
+     */
+    @GetMapping("/user/{username}")
+    public ResponseEntity<List<NotificationDto>> forUser(@PathVariable String username) {
+        return ResponseEntity.ok(notifications.getForUser(username));
     }
 }
+```
+
+> Because you’re enforcing access mainly in the **service** layer with `@PreAuthorize`, I didn’t add controller-level annotations. If you prefer controller-level checks, I can add them.
+
+---
+
+## 9) Trigger notifications from policy actions
+
+Modify your **`PolicyServiceImpl`**:
+
+* Inject `NotificationService`
+* After **create** and **update**, call `notifyDeptHead(...)`
+
+**File:** `src/main/java/org/godigit/policyvault/service/impl/PolicyServiceImpl.java`
+(Only the relevant diffs are shown below—keep your existing logic as-is.)
+
+```java
+// imports
+import org.godigit.policyvault.service.NotificationService;
+
+// class fields
+private final NotificationService notificationService;
+
+// constructor
+public PolicyServiceImpl(PolicyRepository policyRepo,
+                         PolicyVersionRepository versionRepo,
+                         ChangeLogRepository changeLogRepo,
+                         NotificationService notificationService) {
+    this.policyRepo = policyRepo;
+    this.versionRepo = versionRepo;
+    this.changeLogRepo = changeLogRepo;
+    this.notificationService = notificationService;
+}
+```
+
+**After create policy:**
+
+```java
+// After you save 'policy' and 'version'
+notificationService.notifyDeptHead(
+        policy.getDepartment(),
+        "A new policy \"" + policy.getTitle() + "\" was created in " + policy.getDepartment(),
+        policy
+);
+```
+
+**After update policy:**
+
+```java
+// After you save the new version and changelog, and update policy version number
+notificationService.notifyDeptHead(
+        policy.getDepartment(),
+        "Policy \"" + policy.getTitle() + "\" was updated to v" + newVersion + " in " + policy.getDepartment(),
+        policy
+);
+```
+
+> If your `Policy` entity stores department as a `String` (e.g., `"Finance"`), this will work.
+> If you later introduce a `Department` entity, we can update the references cleanly.
+
+---
+
+## 10) (Optional) Security config route
+
+If your security config uses ant matchers, ensure **`/notifications/**` is authenticated**:
+
+```java
+// In SecurityConfig where you authorize requests
+.requestMatchers("/auth/**").permitAll()
+.requestMatchers("/notifications/**").authenticated()
+// you can tighten admin-only endpoints if you later move checks to controllers
+.anyRequest().authenticated()
+```
+
+(Your method security in `NotificationService` already restricts who can see what.)
+
+---
+
+## 11) How to test (Insomnia/Postman)
+
+1. **Create or update a policy** (as COMPLIANCE\_OFFICER or ADMIN).
+   That will trigger notifications to the **Dept Head** of that policy’s department.
+
+2. Login as the dept head, get your token, then call:
+
+* `GET /notifications/my` → should list your notifications (newest first)
+* `GET /notifications/my/unread-count` → integer count
+* `PATCH /notifications/{id}/read` → marks a notification as read (204 No Content)
+
+If you want to preview quickly, you can temporarily add:
+
+* `GET /notifications/user/{username}` as ADMIN and see other users’ notifications.
+
+---
+
+## That’s it 🎯
+
+* You now have a **DB-backed notification system**.
+* Notifications are **created automatically** on policy create/update.
+* Dept Heads can **fetch & mark as read**.
+* Access is enforced in the **service layer** (consistent with your current approach).
+
+If you want email or realtime (WebSocket) delivery later, we can layer it on top of this foundation without changing your business logic.
