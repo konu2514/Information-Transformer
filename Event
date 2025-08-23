@@ -1,0 +1,40 @@
+package org.godigit.policyvault.Listener;
+
+import lombok.RequiredArgsConstructor;
+import org.godigit.policyvault.service.NotificationService;
+import org.springframework.context.event.EventListener;
+import org.springframework.stereotype.Component;
+
+/**
+ * Listens for policy events and creates notifications.
+ */
+@Component
+@RequiredArgsConstructor
+public class NotificationListener {
+
+    private final NotificationService notificationService;
+
+    @EventListener
+    public void handlePolicyUpdated(PolicyUpdatedEvent event) {
+        notificationService.createNotification(event.getMessage());
+    }
+}
+
+package org.godigit.policyvault.Listener;
+
+import lombok.Getter;
+import org.springframework.context.ApplicationEvent;
+
+
+/**
+ * Event fired whenever a policy is created or updated.
+ */
+@Getter
+public class PolicyUpdatedEvent extends ApplicationEvent {
+    private final String message;
+
+    public PolicyUpdatedEvent(Object source, String message) {
+        super(source);
+        this.message = message;
+    }
+}
