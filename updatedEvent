@@ -1,0 +1,73 @@
+✅ Good question — yes, we’ll make a **small change** here to also trigger the **email sending** in addition to saving the notification.
+
+Right now, your `NotificationListener` only calls `notificationService.createNotification(event.getMessage());`.
+To send emails, it should also call `emailService.sendPolicyUpdateEmail(event.getMessage());`.
+
+Here’s the **updated code**:
+
+---
+
+### `NotificationListener.java`
+
+```java
+package org.godigit.policyvault.Listener;
+
+import lombok.RequiredArgsConstructor;
+import org.godigit.policyvault.service.NotificationService;
+import org.godigit.policyvault.service.EmailService;
+import org.springframework.context.event.EventListener;
+import org.springframework.stereotype.Component;
+
+/**
+ * Listens for policy events and creates notifications + sends emails.
+ */
+@Component
+@RequiredArgsConstructor
+public class NotificationListener {
+
+    private final NotificationService notificationService;
+    private final EmailService emailService; // NEW
+
+    @EventListener
+    public void handlePolicyUpdated(PolicyUpdatedEvent event) {
+        // Save in DB
+        notificationService.createNotification(event.getMessage());
+
+        // Send Email
+        emailService.sendPolicyUpdateEmail(event.getMessage());
+    }
+}
+```
+
+---
+
+### `PolicyUpdatedEvent.java`
+
+👉 This class is fine, **no change needed** since you’re only passing the `message`.
+
+```java
+package org.godigit.policyvault.Listener;
+
+import lombok.Getter;
+import org.springframework.context.ApplicationEvent;
+
+/**
+ * Event fired whenever a policy is created or updated.
+ */
+@Getter
+public class PolicyUpdatedEvent extends ApplicationEvent {
+    private final String message;
+
+    public PolicyUpdatedEvent(Object source, String message) {
+        super(source);
+        this.message = message;
+    }
+}
+```
+
+---
+
+⚡ So only **`NotificationListener`** needs an update.
+No change needed in **`PolicyUpdatedEvent`**.
+
+Do you want me to also update your **`NotificationService`** with `@Transactional` just to make sure DB save happens safely before sending the email?
