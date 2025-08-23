@@ -1,0 +1,202 @@
+Got it 👍 Thanks for being clear.
+
+✅ Good news: you **don’t** need to touch `PolicyServiceImpl`, `NotificationListener`, or `PolicyUpdatedEvent`.
+We’ll just **add one new service** (`EmailService`) and **update `NotificationServiceImpl`**.
+The rest works as-is.
+
+Here’s the full code for what you need:
+
+---
+
+### 1. `EmailService.java` (new interface)
+
+```java
+package org.godigit.policyvault.service;
+
+public interface EmailService {
+    void sendEmail(String to, String subject, String body);
+}
+```
+
+---
+
+### 2. `EmailServiceImpl.java` (new implementation)
+
+```java
+package org.godigit.policyvault.service.impl;
+
+import org.godigit.policyvault.service.EmailService;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSender;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+
+@Service
+public class EmailServiceImpl implements EmailService {
+
+    private final JavaMailSender mailSender;
+
+    // Read recipients from application.properties
+    private final List<String> recipients;
+
+    public EmailServiceImpl(JavaMailSender mailSender,
+                            @Value("${app.mail.recipients}") List<String> recipients) {
+        this.mailSender = mailSender;
+        this.recipients = recipients;
+    }
+
+    @Override
+    public void sendEmail(String subject, String body) {
+        SimpleMailMessage message = new SimpleMailMessage();
+        message.setSubject(subject);
+        message.setText(body);
+
+        // Convert list to array of Strings
+        message.setTo(recipients.toArray(new String[0]));
+
+        mailSender.send(message);
+    }
+}
+
+```
+
+---
+
+### 3. `NotificationServiceImpl.java` (updated)
+
+```java
+package org.godigit.policyvault.service.impl;
+
+import lombok.RequiredArgsConstructor;
+import org.godigit.policyvault.entities.Notification;
+import org.godigit.policyvault.repository.NotificationRepository;
+import org.godigit.policyvault.service.NotificationService;
+import org.godigit.policyvault.service.EmailService;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.time.Instant;
+
+@Service
+@RequiredArgsConstructor
+public class NotificationServiceImpl implements NotificationService {
+
+    private final NotificationRepository notificationRepo;
+    private final EmailService emailService;
+
+    // 📧 Compliance officer email from application.properties
+    @Value("${app.notification.email.to}")
+    private String complianceOfficerEmail;
+
+    @Override
+    public void createNotification(String message) {
+        var notification = new Notification();
+        notification.setMessage(message);
+        notification.setCreatedAt(Instant.now());
+        notificationRepo.save(notification);
+
+        // ✅ Send email also
+        emailService.sendEmail(
+                complianceOfficerEmail,
+                "Policy Notification",
+                message
+        );
+    }
+
+    @Override
+    public void createNotification(String userId, String message) {
+        var notification = new Notification();
+        notification.setUserId(userId);
+        notification.setMessage(message);
+        notification.setCreatedAt(Instant.now());
+        notificationRepo.save(notification);
+
+        // ✅ Send email also
+        emailService.sendEmail(
+                complianceOfficerEmail,
+                "Policy Notification",
+                "User " + userId + ": " + message
+        );
+    }
+}
+```
+
+---
+
+### 4. `application.properties` (add these lines)
+
+# ===============================
+# Application Info
+# ===============================
+spring.application.name=Policy Vault
+server.port=8080
+
+# ===============================
+# Database Configuration
+# ===============================
+spring.datasource.url=jdbc:postgresql://localhost:5432/policyvault
+spring.datasource.username=postgres
+spring.datasource.password=root
+spring.datasource.driver-class-name=org.postgresql.Driver
+
+# ===============================
+# JPA / Hibernate
+# ===============================
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+
+# ===============================
+# Logging
+# ===============================
+logging.level.org.springframework.web=DEBUG
+
+# ===============================
+# Profile
+# ===============================
+spring.profiles.active=dev
+
+# ===============================
+# Security (JWT)
+# ===============================
+security.jwt.secret=riketbhosalesiddharthgirishchandrabhattmanjunathkonu
+security.jwt.expiration=3600000
+
+# ===============================
+# Mail Configuration
+# ===============================
+spring.mail.host=smtp.gmail.com
+spring.mail.port=587
+spring.mail.username=yourgmail@gmail.com      # Replace with sender Gmail
+spring.mail.password=your-app-password        # Replace with Gmail app password
+spring.mail.properties.mail.smtp.auth=true
+spring.mail.properties.mail.smtp.starttls.enable=true
+
+# ===============================
+# Custom App Config
+# ===============================
+# List of recipients (comma-separated if multiple)
+app.mail.recipients=recipient1@gmail.com,recipient2@gmail.com
+
+
+### 🔑 Summary
+
+* New: `EmailService.java`, `EmailServiceImpl.java`
+* Updated: `NotificationServiceImpl.java`
+* Add SMTP configs in `application.properties`
+* **No changes** needed in `PolicyServiceImpl`, `PolicyUpdatedEvent`, `NotificationListener`
+
+That’s it 🎉.
+Next time a policy is created/updated/deleted → notification will be saved **and** compliance officer will get an email.
+
+---
+
+Do you want me to also give you a **step-by-step guide to test the email feature locally** (without using your real Gmail)?
+
+
+
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-mail</artifactId>
+</dependency>
