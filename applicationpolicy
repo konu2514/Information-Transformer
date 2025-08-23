@@ -1,0 +1,30 @@
+spring.application.name=Policy Vault
+
+server.port=8080
+
+spring.datasource.url=jdbc:postgresql://localhost:5432/policyvault
+spring.datasource.username=postgres
+spring.datasource.password=root
+spring.datasource.driver-class-name=org.postgresql.Driver
+spring.jpa.hibernate.ddl-auto=update
+
+spring.jpa.show-sql=true
+logging.level.org.springframework.web=DEBUG
+spring.profiles.active=dev
+security.jwt.secret=riketbhosalesiddharthgirishchandrabhattmanjunathkonu
+security.jwt.expiration=3600000
+
+
+
+package org.godigit.policyvault.service;
+
+import org.godigit.policyvault.dto.NotificationDto;
+import org.godigit.policyvault.entities.Notification;
+
+import java.util.List;
+import java.util.UUID;
+
+public interface NotificationService {
+    void createNotification(String message);
+    List<Notification> getAllNotifications();
+}
